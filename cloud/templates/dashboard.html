@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Noise Monitoring Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 24px;
+      background: #f7f7f7;
+      color: #222;
+    }
+
+    h1 {
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      margin-bottom: 24px;
+      color: #555;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+
+    .three-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 20px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    }
+
+    .stat {
+      margin: 8px 0;
+      font-size: 16px;
+    }
+
+    .alert-banner {
+      display: none;
+      background: #ffe5e5;
+      color: #a40000;
+      border: 1px solid #ffb3b3;
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-weight: bold;
+    }
+
+    .alert-high {
+      color: #b00020;
+      font-weight: bold;
+    }
+
+    .alert-normal {
+      color: #1b7f3b;
+      font-weight: bold;
+    }
+
+    ul {
+      padding-left: 20px;
+      margin-top: 10px;
+    }
+
+    li {
+      margin-bottom: 14px;
+    }
+
+    .small {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .chart-wrap {
+      position: relative;
+      height: 420px;
+    }
+
+    .chart-wrap.small-chart {
+      height: 320px;
+    }
+
+    @media (max-width: 1000px) {
+      .three-col {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h1>Noise Monitoring Dashboard</h1>
+  <div class="subtitle">
+    Live dashboard for event summaries, latest recording detail, alerts, and detected sound sources.
+  </div>
+
+  <div id="alertBanner" class="alert-banner"></div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Noise Levels Over Time</h2>
+      <div class="small">One point per recording/event using average and maximum dBFS.</div>
+      <div class="chart-wrap">
+        <canvas id="summaryChart"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Last Recording Noise Levels</h2>
+      <div class="small">Per-second dBFS values from the most recent recording.</div>
+      <div class="chart-wrap small-chart">
+        <canvas id="recordingChart"></canvas>
+      </div>
+    </div>
+
+    <div class="three-col">
+      <div class="card">
+        <h2>Current Reading</h2>
+        <div id="currentReading">
+          <div class="stat">Loading latest data...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Recent Alerts</h2>
+        <ul id="alertsList">
+          <li>Loading alerts...</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Detected Sound Sources</h2>
+        <ul id="sourcesList">
+          <li>Loading sources...</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let summaryChart = null;
+    let recordingChart = null;
+
+    const THRESHOLD_DBFS = -10.0;
+    const ALERT_SECONDS_REQUIRED = 3;
+    const PACIFIC_TZ = "America/Los_Angeles";
+
+    async function fetchJson(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Request failed for ${url}: ${response.status}`);
+      }
+      return await response.json();
+    }
+
+    function formatNumber(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "N/A";
+      }
+      return Number(value).toFixed(2);
+    }
+
+    function formatConfidence(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "N/A";
+      }
+      return (Number(value) * 100).toFixed(1) + "%";
+    }
+
+    function formatPacificTime(timestamp) {
+      if (!timestamp) return "N/A";
+
+      const date = new Date(timestamp);
+      if (Number.isNaN(date.getTime())) return timestamp;
+
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: PACIFIC_TZ,
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+        timeZoneName: "short"
+      }).format(date);
+    }
+
+    function renderAlertBanner(latest) {
+      const banner = document.getElementById("alertBanner");
+
+      if (!latest || !Array.isArray(latest.dbfs_series_1s)) {
+        banner.style.display = "none";
+        banner.textContent = "";
+        return;
+      }
+
+      const exceededSeconds = latest.dbfs_series_1s.filter(v => Number(v) >= THRESHOLD_DBFS).length;
+      const confidenceText =
+        latest.yamnet_confidence != null
+          ? ` | Confidence ${formatConfidence(latest.yamnet_confidence)}`
+          : "";
+
+      if (exceededSeconds >= ALERT_SECONDS_REQUIRED) {
+        banner.style.display = "block";
+        banner.textContent =
+          `🚨 HIGH NOISE EVENT DETECTED — ${latest.yamnet_label || "unknown source"}${confidenceText} | ` +
+          `${exceededSeconds} second(s) above threshold | ` +
+          `Peak ${formatNumber(latest.max_dbfs)} dBFS | ` +
+          `${formatPacificTime(latest.timestamp)}`;
+      } else {
+        banner.style.display = "none";
+        banner.textContent = "";
+      }
+    }
+
+    function renderCurrentReading(latest) {
+      const container = document.getElementById("currentReading");
+
+      if (!latest) {
+        container.innerHTML = `<div class="stat">No data yet.</div>`;
+        return;
+      }
+
+      const dbfsSeries = Array.isArray(latest.dbfs_series_1s) ? latest.dbfs_series_1s : [];
+      const exceededSeconds = dbfsSeries.filter(v => Number(v) >= THRESHOLD_DBFS).length;
+      const exceeded = exceededSeconds >= ALERT_SECONDS_REQUIRED;
+
+      container.innerHTML = `
+        <div class="stat"><strong>Time:</strong> ${formatPacificTime(latest.timestamp)}</div>
+        <div class="stat"><strong>Device:</strong> ${latest.device_id || "N/A"}</div>
+        <div class="stat"><strong>Average dBFS:</strong> ${formatNumber(latest.avg_dbfs)}</div>
+        <div class="stat"><strong>Max dBFS:</strong> ${formatNumber(latest.max_dbfs)}</div>
+        <div class="stat"><strong>Min dBFS:</strong> ${formatNumber(latest.min_dbfs)}</div>
+        <div class="stat"><strong>Source:</strong> ${latest.yamnet_label || "unknown"}</div>
+        <div class="stat"><strong>Confidence:</strong> ${formatConfidence(latest.yamnet_confidence)}</div>
+        <div class="stat"><strong>Recording duration:</strong> ${formatNumber(latest.duration_s)} s</div>
+        <div class="stat"><strong>Seconds above threshold:</strong> ${exceededSeconds}</div>
+        <div class="stat"><strong>Status:</strong>
+          <span class="${exceeded ? 'alert-high' : 'alert-normal'}">
+            ${exceeded ? 'Alert triggered' : 'Normal'}
+          </span>
+        </div>
+        <div class="small">Threshold: ${THRESHOLD_DBFS} dBFS | Required seconds: ${ALERT_SECONDS_REQUIRED}</div>
+      `;
+    }
+
+    function renderAlerts(alerts) {
+      const alertsList = document.getElementById("alertsList");
+
+      if (!alerts || alerts.length === 0) {
+        alertsList.innerHTML = "<li>No alerts yet.</li>";
+        return;
+      }
+
+      const recentAlerts = alerts.slice(-10).reverse();
+
+      alertsList.innerHTML = recentAlerts.map(alert => `
+        <li>
+          <strong>${formatPacificTime(alert.timestamp)}</strong><br />
+          Source: ${alert.yamnet_label || "unknown"}${
+            alert.yamnet_confidence != null
+              ? " (" + formatConfidence(alert.yamnet_confidence) + ")"
+              : ""
+          }<br />
+          Peak: ${formatNumber(alert.max_dbfs)} dBFS<br />
+          Seconds above threshold: ${alert.seconds_exceeded ?? "N/A"}
+        </li>
+      `).join("");
+    }
+
+    function renderSources(history) {
+      const sourcesList = document.getElementById("sourcesList");
+
+      if (!history || history.length === 0) {
+        sourcesList.innerHTML = "<li>No sound source data yet.</li>";
+        return;
+      }
+
+      const counts = {};
+      for (const item of history) {
+        const label = item.yamnet_label || "unknown";
+        counts[label] = (counts[label] || 0) + 1;
+      }
+
+      const sortedEntries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+
+      sourcesList.innerHTML = sortedEntries.map(([label, count]) => `
+        <li><strong>${label}</strong>: ${count} event(s)</li>
+      `).join("");
+    }
+
+    function renderSummaryChart(history) {
+      const labels = history.map(item => formatPacificTime(item.timestamp));
+      const avgData = history.map(item => item.avg_dbfs ?? null);
+      const maxData = history.map(item => item.max_dbfs ?? null);
+      const thresholdData = history.map(() => THRESHOLD_DBFS);
+
+      const ctx = document.getElementById("summaryChart").getContext("2d");
+
+      if (!summaryChart) {
+        summaryChart = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: "Average dBFS",
+                data: avgData,
+                borderWidth: 2,
+                tension: 0.25
+              },
+              {
+                label: "Max dBFS",
+                data: maxData,
+                borderWidth: 2,
+                tension: 0.25
+              },
+              {
+                label: "Threshold",
+                data: thresholdData,
+                borderWidth: 2,
+                borderDash: [6, 6],
+                pointRadius: 0,
+                tension: 0
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+              x: {
+                title: {
+                  display: true,
+                  text: "Pacific Time"
+                }
+              },
+              y: {
+                title: {
+                  display: true,
+                  text: "dBFS"
+                }
+              }
+            }
+          }
+        });
+      } else {
+        summaryChart.data.labels = labels;
+        summaryChart.data.datasets[0].data = avgData;
+        summaryChart.data.datasets[1].data = maxData;
+        summaryChart.data.datasets[2].data = thresholdData;
+        summaryChart.update();
+      }
+    }
+
+    function renderRecordingChart(latest) {
+      const ctx = document.getElementById("recordingChart").getContext("2d");
+
+      const dbfsSeries = Array.isArray(latest?.dbfs_series_1s) ? latest.dbfs_series_1s : [];
+      const labels = dbfsSeries.map((_, index) => index);
+      const thresholdData = dbfsSeries.map(() => THRESHOLD_DBFS);
+
+      if (!recordingChart) {
+        recordingChart = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: "Last recording dBFS",
+                data: dbfsSeries,
+                borderWidth: 2,
+                tension: 0.2
+              },
+              {
+                label: "Threshold",
+                data: thresholdData,
+                borderWidth: 2,
+                borderDash: [6, 6],
+                pointRadius: 0,
+                tension: 0
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+              x: {
+                title: {
+                  display: true,
+                  text: "Second"
+                }
+              },
+              y: {
+                title: {
+                  display: true,
+                  text: "dBFS"
+                }
+              }
+            }
+          }
+        });
+      } else {
+        recordingChart.data.labels = labels;
+        recordingChart.data.datasets[0].data = dbfsSeries;
+        recordingChart.data.datasets[1].data = thresholdData;
+        recordingChart.update();
+      }
+    }
+
+    async function loadDashboard() {
+      try {
+        const [history, alerts] = await Promise.all([
+          fetchJson("/history"),
+          fetchJson("/alerts")
+        ]);
+
+        const latest = history.length > 0 ? history[history.length - 1] : null;
+
+        renderAlertBanner(latest);
+        renderCurrentReading(latest);
+        renderAlerts(alerts);
+        renderSources(history);
+        renderSummaryChart(history);
+        renderRecordingChart(latest);
+      } catch (error) {
+        console.error(error);
+        document.getElementById("currentReading").innerHTML =
+          `<div class="stat">Error loading dashboard data.</div>`;
+        document.getElementById("alertsList").innerHTML =
+          `<li>Error loading alerts.</li>`;
+        document.getElementById("sourcesList").innerHTML =
+          `<li>Error loading sound sources.</li>`;
+      }
+    }
+
+    loadDashboard();
+    setInterval(loadDashboard, 5000);
+  </script>
+</body>
+</html>
